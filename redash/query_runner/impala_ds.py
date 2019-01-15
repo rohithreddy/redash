@@ -1,9 +1,7 @@
-import json
 import logging
-import sys
 
 from redash.query_runner import *
-from redash.utils import JSONEncoder
+from redash.utils import json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +9,7 @@ try:
     from impala.dbapi import connect
     from impala.error import DatabaseError, RPCError
     enabled = True
-except ImportError, e:
+except ImportError as e:
     enabled = False
 
 COLUMN_NAME = 0
@@ -35,6 +33,8 @@ types_map = {
 
 
 class Impala(BaseSQLQueryRunner):
+    noop_query = "show schemas"
+
     @classmethod
     def configuration_schema(cls):
         return {
@@ -74,30 +74,23 @@ class Impala(BaseSQLQueryRunner):
     def type(cls):
         return "impala"
 
-    def __init__(self, configuration):
-        super(Impala, self).__init__(configuration)
-
     def _get_tables(self, schema_dict):
-        try:
-            schemas_query = "show schemas;"
+        schemas_query = "show schemas;"
+        tables_query = "show tables in %s;"
+        columns_query = "show column stats %s.%s;"
 
-            tables_query = "show tables in %s;"
+        for schema_name in map(lambda a: unicode(a['name']), self._run_query_internal(schemas_query)):
+            for table_name in map(lambda a: unicode(a['name']), self._run_query_internal(tables_query % schema_name)):
+                columns = map(lambda a: unicode(a['Column']), self._run_query_internal(columns_query % (schema_name, table_name)))
 
-            columns_query = "show column stats %s;"
+                if schema_name != 'default':
+                    table_name = '{}.{}'.format(schema_name, table_name)
 
-            for schema_name in map(lambda a: a['name'], self._run_query_internal(schemas_query)):
-                for table_name in map(lambda a: a['name'], self._run_query_internal(tables_query % schema_name)):
-                    columns = map(lambda a: a['Column'], self._run_query_internal(columns_query % table_name))
+                schema_dict[table_name] = {'name': table_name, 'columns': columns}
 
-                    if schema_name != 'default':
-                        table_name = '{}.{}'.format(schema_name, table_name)
+        return schema_dict.values()
 
-                    schema[table_name] = {'name': table_name, 'columns': columns}
-        except Exception, e:
-            raise sys.exc_info()[1], None, sys.exc_info()[2]
-        return schema.values()
-
-    def run_query(self, query):
+    def run_query(self, query, user):
 
         connection = None
         try:
@@ -123,24 +116,19 @@ class Impala(BaseSQLQueryRunner):
             rows = [dict(zip(column_names, row)) for row in cursor]
 
             data = {'columns': columns, 'rows': rows}
-            json_data = json.dumps(data, cls=JSONEncoder)
+            json_data = json_dumps(data)
             error = None
             cursor.close()
         except DatabaseError as e:
-            logging.exception(e)
             json_data = None
             error = e.message
         except RPCError as e:
-            logging.exception(e)
             json_data = None
             error = "Metastore Error [%s]" % e.message
         except KeyboardInterrupt:
             connection.cancel()
             error = "Query cancelled by user."
             json_data = None
-        except Exception as e:
-            logging.exception(e)
-            raise sys.exc_info()[1], None, sys.exc_info()[2]
         finally:
             if connection:
                 connection.close()

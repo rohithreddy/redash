@@ -1,9 +1,10 @@
-import json
 import datetime
-import requests
 import logging
+
+import requests
+
 from redash.query_runner import *
-from redash.utils import JSONEncoder
+from redash.utils import json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ def _transform_result(response):
             rows.append({'Time::x': timestamp, 'name::series': series['target'], 'value::y': values[0]})
 
     data = {'columns': columns, 'rows': rows}
-    return json.dumps(data, cls=JSONEncoder)
+    return json_dumps(data)
 
 
 class Graphite(BaseQueryRunner):
@@ -63,7 +64,12 @@ class Graphite(BaseQueryRunner):
         self.verify = self.configuration.get("verify", True)
         self.base_url = "%s/render?format=json&" % self.configuration['url']
 
-    def run_query(self, query):
+    def test_connection(self):
+        r = requests.get("{}/render".format(self.configuration['url']), auth=self.auth, verify=self.verify)
+        if r.status_code != 200:
+            raise Exception("Got invalid response from Graphite (http status code: {0}).".format(r.status_code))
+
+    def run_query(self, query, user):
         url = "%s%s" % (self.base_url, "&".join(query.split("\n")))
         error = None
         data = None
@@ -75,7 +81,7 @@ class Graphite(BaseQueryRunner):
                 data = _transform_result(response)
             else:
                 error = "Failed getting results (%d)" % response.status_code
-        except Exception, ex:
+        except Exception as ex:
             data = None
             error = ex.message
 

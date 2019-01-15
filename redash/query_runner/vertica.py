@@ -1,8 +1,7 @@
 import sys
-import json
 import logging
 
-from redash.utils import JSONEncoder
+from redash.utils import json_loads, json_dumps
 from redash.query_runner import *
 
 logger = logging.getLogger(__name__)
@@ -29,6 +28,8 @@ types_map = {
 
 
 class Vertica(BaseSQLQueryRunner):
+    noop_query = "SELECT 1"
+
     @classmethod
     def configuration_schema(cls):
         return {
@@ -51,8 +52,17 @@ class Vertica(BaseSQLQueryRunner):
                 "port": {
                     "type": "number"
                 },
+                "read_timeout": {
+                    "type": "number",
+                    "title": "Read Timeout"
+                },
+                "connection_timeout": {
+                    "type": "number",
+                    "title": "Connection Timeout"
+                },
             },
             'required': ['database'],
+            'order': ['host', 'port', 'user', 'password', 'database', 'read_timeout', 'connection_timeout'],
             'secret': ['password']
         }
 
@@ -65,20 +75,19 @@ class Vertica(BaseSQLQueryRunner):
 
         return True
 
-    def __init__(self, configuration):
-        super(Vertica, self).__init__(configuration)
-
     def _get_tables(self, schema):
         query = """
-        Select table_schema, table_name, column_name from columns where is_system_table=false;
+        Select table_schema, table_name, column_name from columns where is_system_table=false
+        union all
+        select table_schema, table_name, column_name from view_columns;
         """
 
-        results, error = self.run_query(query)
+        results, error = self.run_query(query, None)
 
         if error is not None:
             raise Exception("Failed getting schema.")
 
-        results = json.loads(results)
+        results = json_loads(results)
 
         for row in results['rows']:
             table_name = '{}.{}'.format(row['table_schema'], row['table_name'])
@@ -90,7 +99,7 @@ class Vertica(BaseSQLQueryRunner):
 
         return schema.values()
 
-    def run_query(self, query):
+    def run_query(self, query, user):
         import vertica_python
 
         if query == "":
@@ -105,8 +114,13 @@ class Vertica(BaseSQLQueryRunner):
                 'port': self.configuration.get('port', 5433),
                 'user': self.configuration.get('user', ''),
                 'password': self.configuration.get('password', ''),
-                'database': self.configuration.get('database', '')
+                'database': self.configuration.get('database', ''),
+                'read_timeout': self.configuration.get('read_timeout', 600)
             }
+            
+            if self.configuration.get('connection_timeout'):
+                conn_info['connection_timeout'] = self.configuration.get('connection_timeout')
+
             connection = vertica_python.connect(**conn_info)
             cursor = connection.cursor()
             logger.debug("Vetica running query: %s", query)
@@ -122,7 +136,7 @@ class Vertica(BaseSQLQueryRunner):
                             'type': types_map.get(col[1], None)} for col in columns_data]
 
                 data = {'columns': columns, 'rows': rows}
-                json_data = json.dumps(data, cls=JSONEncoder)
+                json_data = json_dumps(data)
                 error = None
             else:
                 json_data = None
@@ -132,8 +146,6 @@ class Vertica(BaseSQLQueryRunner):
         except KeyboardInterrupt:
             error = "Query cancelled by user."
             json_data = None
-        except Exception as e:
-            raise sys.exc_info()[1], None, sys.exc_info()[2]
         finally:
             if connection:
                 connection.close()

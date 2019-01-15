@@ -1,9 +1,9 @@
-import json
 import logging
 import sys
+import uuid
 
 from redash.query_runner import *
-from redash.utils import JSONEncoder
+from redash.utils import json_dumps, json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +16,18 @@ except ImportError:
 # from _mssql.pyx ## DB-API type definitions & http://www.freetds.org/tds.html#types ##
 types_map = {
     1: TYPE_STRING,
-    2: TYPE_BOOLEAN,
-    3: TYPE_INTEGER,
+    2: TYPE_STRING,
+    # Type #3 supposed to be an integer, but in some cases decimals are returned
+    # with this type. To be on safe side, marking it as float.
+    3: TYPE_FLOAT,
     4: TYPE_DATETIME,
     5: TYPE_FLOAT,
 }
 
+
 class SqlServer(BaseSQLQueryRunner):
+    noop_query = "SELECT 1"
+
     @classmethod
     def configuration_schema(cls):
         return {
@@ -41,6 +46,16 @@ class SqlServer(BaseSQLQueryRunner):
                 "port": {
                     "type": "number",
                     "default": 1433
+                },
+                "tds_version": {
+                    "type": "string",
+                    "default": "7.0",
+                    "title": "TDS Version"
+                },
+                "charset": {
+                    "type": "string",
+                    "default": "UTF-8",
+                    "title": "Character Set"
                 },
                 "db": {
                     "type": "string",
@@ -63,29 +78,30 @@ class SqlServer(BaseSQLQueryRunner):
     def type(cls):
         return "mssql"
 
-    def __init__(self, configuration):
-        super(SqlServer, self).__init__(configuration)
+    @classmethod
+    def annotate_query(cls):
+        return False
 
     def _get_tables(self, schema):
         query = """
         SELECT table_schema, table_name, column_name
-        FROM information_schema.columns
+        FROM INFORMATION_SCHEMA.COLUMNS
         WHERE table_schema NOT IN ('guest','INFORMATION_SCHEMA','sys','db_owner','db_accessadmin'
                                   ,'db_securityadmin','db_ddladmin','db_backupoperator','db_datareader'
                                   ,'db_datawriter','db_denydatareader','db_denydatawriter'
                                   );
         """
 
-        results, error = self.run_query(query)
+        results, error = self.run_query(query, None)
 
         if error is not None:
             raise Exception("Failed getting schema.")
 
-        results = json.loads(results)
+        results = json_loads(results)
 
         for row in results['rows']:
             if row['table_schema'] != self.configuration['db']:
-                table_name = '{}.{}'.format(row['table_schema'], row['table_name'])
+                table_name = u'{}.{}'.format(row['table_schema'], row['table_name'])
             else:
                 table_name = row['table_name']
 
@@ -96,9 +112,7 @@ class SqlServer(BaseSQLQueryRunner):
 
         return schema.values()
 
-
-    def run_query(self, query):
-
+    def run_query(self, query, user):
         connection = None
 
         try:
@@ -107,11 +121,17 @@ class SqlServer(BaseSQLQueryRunner):
             password = self.configuration.get('password', '')
             db = self.configuration['db']
             port = self.configuration.get('port', 1433)
+            tds_version = self.configuration.get('tds_version', '7.0')
+            charset = self.configuration.get('charset', 'UTF-8')
 
             if port != 1433:
                 server = server + ':' + str(port)
 
-            connection = pymssql.connect(server, user, password, db)
+            connection = pymssql.connect(server=server, user=user, password=password, database=db, tds_version=tds_version, charset=charset)
+
+            if isinstance(query, unicode):
+                query = query.encode(charset)
+
             cursor = connection.cursor()
             logger.debug("SqlServer running query: %s", query)
 
@@ -123,7 +143,7 @@ class SqlServer(BaseSQLQueryRunner):
                 rows = [dict(zip((c['name'] for c in columns), row)) for row in data]
 
                 data = {'columns': columns, 'rows': rows}
-                json_data = json.dumps(data, cls=JSONEncoder)
+                json_data = json_dumps(data)
                 error = None
             else:
                 error = "No data was returned."
@@ -131,7 +151,6 @@ class SqlServer(BaseSQLQueryRunner):
 
             cursor.close()
         except pymssql.Error as e:
-            logging.exception(e)
             try:
                 # Query errors are at `args[1]`
                 error = e.args[1]
@@ -143,8 +162,6 @@ class SqlServer(BaseSQLQueryRunner):
             connection.cancel()
             error = "Query cancelled by user."
             json_data = None
-        except Exception as e:
-            raise sys.exc_info()[1], None, sys.exc_info()[2]
         finally:
             if connection:
                 connection.close()

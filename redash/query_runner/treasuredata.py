@@ -1,13 +1,13 @@
-import json
-
-from redash.utils import JSONEncoder
-from redash.query_runner import *
-
 import logging
+
+from redash.query_runner import *
+from redash.utils import json_dumps
+
 logger = logging.getLogger(__name__)
 
 try:
     import tdclient
+    from tdclient import errors
     enabled = True
 
 except ImportError:
@@ -34,6 +34,8 @@ TD_TYPES_MAPPING = {
 
 
 class TreasureData(BaseQueryRunner):
+    noop_query = "SELECT 1"
+
     @classmethod
     def configuration_schema(cls):
         return {
@@ -73,9 +75,6 @@ class TreasureData(BaseQueryRunner):
     def type(cls):
         return "treasuredata"
 
-    def __init__(self, configuration):
-        super(TreasureData, self).__init__(configuration)
-
     def get_schema(self, get_stats=False):
         schema = {}
         if self.configuration.get('get_schema', False):
@@ -84,12 +83,15 @@ class TreasureData(BaseQueryRunner):
                     for table in client.tables(self.configuration.get('db')):
                         table_name = '{}.{}'.format(self.configuration.get('db'), table.name)
                         for table_schema in table.schema:
-                            schema[table_name] = {'name': table_name, 'columns': table.schema}
-            except Exception, ex:
+                            schema[table_name] = {
+                                'name': table_name,
+                                'columns': [column[0] for column in table.schema],
+                            }
+            except Exception as ex:
                 raise Exception("Failed getting schema")
         return schema.values()
 
-    def run_query(self, query):
+    def run_query(self, query, user):
         connection = tdclient.connect(
                 endpoint=self.configuration.get('endpoint', 'https://api.treasuredata.com'),
                 apikey=self.configuration.get('apikey'),
@@ -97,23 +99,21 @@ class TreasureData(BaseQueryRunner):
                 db=self.configuration.get('db'))
 
         cursor = connection.cursor()
-
         try:
             cursor.execute(query)
-            columns_data = [(row[0], cursor.show_job()['hive_result_schema'][i][1]) for i,row in enumerate(cursor.description)]
+            columns_tuples = [(i[0], TD_TYPES_MAPPING.get(i[1], None)) for i in cursor.show_job()['hive_result_schema']]
+            columns = self.fetch_columns(columns_tuples)
 
-            columns = [{'name': col[0],
-                'friendly_name': col[0],
-                'type': TD_TYPES_MAPPING.get(col[1], None)} for col in columns_data]
-
-            rows = [dict(zip(([c[0] for c in columns_data]), r)) for i, r in enumerate(cursor.fetchall())]
+            if cursor.rowcount == 0:
+                rows = []
+            else:
+                rows = [dict(zip(([c['name'] for c in columns]), r)) for i, r in enumerate(cursor.fetchall())]
             data = {'columns': columns, 'rows': rows}
-            json_data = json.dumps(data, cls=JSONEncoder)
+            json_data = json_dumps(data)
             error = None
-        except Exception, ex:
+        except errors.InternalError as e:
             json_data = None
-            error = ex.message
-
+            error = "%s: %s" % (e.message, cursor.show_job().get('debug', {}).get('stderr', 'No stderr message in the response'))
         return json_data, error
 
 register(TreasureData)

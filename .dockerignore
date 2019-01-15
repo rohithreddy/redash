@@ -1,4 +1,6 @@
-rd_ui/.tmp/
-rd_ui/node_modules/
+client/.tmp/
+client/dist/
+node_modules/
+.tmp/
+.venv/
 .git/
-.vagrant/
